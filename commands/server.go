@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -40,6 +41,22 @@ import (
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	jww "github.com/spf13/jwalterweatherman"
+
+	"crypto"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/ecdsa"
+	"crypto/rsa"
+        "encoding/pem"
+        "golang.org/x/crypto/acme"
+        "golang.org/x/crypto/acme/autocert"
+)
+
+var(
+        prod1 = "https://acme-v01.api.letsencrypt.org/directory"
+        keyName = "path-to-key.pem"
+        keyGen = false
+        privKey *rsa.PrivateKey
 )
 
 type serverCmd struct {
@@ -55,9 +72,13 @@ type serverCmd struct {
 	liveReloadPort    int
 	serverWatch       bool
 	noHTTPCache       bool
+        secure            bool
 
 	disableFastRender   bool
 	disableBrowserError bool
+
+        man *autocert.Manager
+        c *acme.Client
 
 	*baseBuilderCmd
 }
@@ -97,12 +118,61 @@ of a second, you will be able to save and see your changes nearly instantly.`,
 	cc.cmd.Flags().BoolVar(&cc.disableLiveReload, "disableLiveReload", false, "watch without enabling live browser reload on rebuild")
 	cc.cmd.Flags().BoolVar(&cc.navigateToChanged, "navigateToChanged", false, "navigate to changed content file on live browser reload")
 	cc.cmd.Flags().BoolVar(&cc.renderToDisk, "renderToDisk", false, "render to Destination path (default is render to memory & serve from there)")
+	cc.cmd.Flags().BoolVar(&cc.secure, "secure", false, "serve https")
 	cc.cmd.Flags().BoolVar(&cc.disableFastRender, "disableFastRender", false, "enables full re-renders on changes")
 	cc.cmd.Flags().BoolVar(&cc.disableBrowserError, "disableBrowserError", false, "do not show build errors in the browser")
 
 	cc.cmd.Flags().String("memstats", "", "log memory usage to this file")
 	cc.cmd.Flags().String("meminterval", "100ms", "interval to poll memory usage (requires --memstats), valid time units are \"ns\", \"us\" (or \"µs\"), \"ms\", \"s\", \"m\", \"h\".")
 
+        /*
+        data, err := ioutil.ReadFile(keyName)
+        if err != nil {
+                fmt.Printf("%s %v \n", "Generate rsa key", err)
+                keyGen = true
+        }
+        if keyGen {
+                privKey, err = rsa.GenerateKey(rand.Reader, 2048)
+                if err != nil {
+                        fmt.Printf("%s \n", "Generating rsa key")
+                        os.Exit(1) // no other option but to exit
+                }
+                pembytes := x509.MarshalPKCS1PrivateKey(privKey)
+                block := &pem.Block{
+                        Type: "RSA PRIVATE KEY",
+                        Bytes: pembytes,
+                }
+                f, err := os.Create(keyName)
+                if err != nil {
+                        fmt.Printf("%s %v \n", "Creating rsa key file", err)
+                        os.Exit(1) // no other option but to exit
+                }
+                if err = pem.Encode(f, block); err != nil {
+                        fmt.Printf("%s %v \n", "Writing rsa key file", err)
+                }
+        } else { // using key from file
+                // private key
+                priv, _ := pem.Decode(data) // ignore public key
+                if priv == nil || !strings.Contains(priv.Type, "PRIVATE") {
+                        fmt.Printf("%s \n", "Nil rsa key")
+                        os.Exit(1) // no other option but to exit
+                }
+                signer, err := parsePrivateKey(priv.Bytes)
+                if err != nil {
+                        fmt.Printf("%s \n", "Parsing rsa key")
+                        os.Exit(1) // no other option but to exit
+                }
+                privKey = signer.(*rsa.PrivateKey)
+        }
+        cc.c = &acme.Client{DirectoryURL: prod1, Key: privKey}
+        cc.man = &autocert.Manager{
+                Client: cc.c,
+                Email: "email",
+                Prompt: autocert.AcceptTOS,
+                Cache: autocert.DirCache("path-to-dir-cache"),
+                //HostPolicy: autocert.HostWhitelist("domain1", "domain2"),
+        }
+        */
 	return cc
 }
 
@@ -134,6 +204,57 @@ func (sc *serverCmd) server(cmd *cobra.Command, args []string) error {
 	if destination != "" {
 		sc.renderToDisk = true
 	}
+
+        fmt.Println("Secure: ", sc.secure)
+        if sc.secure {
+                data, err := ioutil.ReadFile(keyName)
+                if err != nil {
+                        fmt.Printf("%s %v \n", "Generate rsa key", err)
+                        keyGen = true
+                }
+                if keyGen {
+                        privKey, err = rsa.GenerateKey(rand.Reader, 2048)
+                        if err != nil {
+                                fmt.Printf("%s \n", "Generating rsa key")
+                                os.Exit(1) // no other option but to exit
+                        }
+                        pembytes := x509.MarshalPKCS1PrivateKey(privKey)
+                        block := &pem.Block{
+                                Type: "RSA PRIVATE KEY",
+                                Bytes: pembytes,
+                        }
+                        f, err := os.Create(keyName)
+                        if err != nil {
+                                fmt.Printf("%s %v \n", "Creating rsa key file", err)
+                                os.Exit(1) // no other option but to exit
+                        }
+                        if err = pem.Encode(f, block); err != nil {
+                                fmt.Printf("%s %v \n", "Writing rsa key file", err)
+                        }
+                } else { // using key from file
+                        // private key
+                        priv, _ := pem.Decode(data) // ignore public key
+                        if priv == nil || !strings.Contains(priv.Type, "PRIVATE") {
+                                fmt.Printf("%s \n", "Nil rsa key")
+                                os.Exit(1) // no other option but to exit
+                        }
+                        signer, err := parsePrivateKey(priv.Bytes)
+                        if err != nil {
+                                fmt.Printf("%s \n", "Parsing rsa key")
+                                os.Exit(1) // no other option but to exit
+                        }
+                        privKey = signer.(*rsa.PrivateKey)
+                }
+                sc.c = &acme.Client{DirectoryURL: prod1, Key: privKey}
+                sc.man = &autocert.Manager{
+                        Client: sc.c,
+                        Email: "email",
+                        Prompt: autocert.AcceptTOS,
+                        Cache: autocert.DirCache("path-to-dir-cache"),
+                        //HostPolicy: autocert.HostWhitelist("domain1", "domain2"),
+        }
+
+        }
 
 	var serverCfgInit sync.Once
 
@@ -450,8 +571,22 @@ func (c *commandeer) serve(s *serverCmd) error {
 			mu.HandleFunc("/livereload", livereload.Handler)
 		}
 		jww.FEEDBACK.Printf("Web Server is available at %s (bind address %s)\n", serverURL, s.serverInterface)
+                hs := http.Server{
+                        ReadTimeout: 5 * time.Second,
+                        WriteTimeout: 5 * time.Second,
+                        TLSConfig: s.man.TLSConfig(),
+                        Addr: endpoint,
+                        Handler: mu,
+                }
+                if s.secure {
+                        go startHttp()
+                }
 		go func() {
-			err = http.ListenAndServe(endpoint, mu)
+                        if s.secure {
+                                err = hs.ListenAndServeTLS("", "")
+                        } else {
+                                err = http.ListenAndServe(endpoint, mu)
+                        }
 			if err != nil {
 				c.logger.ERROR.Printf("Error: %s\n", err.Error())
 				os.Exit(1)
@@ -558,4 +693,66 @@ func memStats() error {
 		}()
 	}
 	return nil
+}
+
+// Attempt to parse the given private key DER block. OpenSSL 0.9.8 generates
+// PKCS#1 private keys by default, while OpenSSL 1.0.0 generates PKCS#8 keys.
+// OpenSSL ecparam generates SEC1 EC private keys for ECDSA. We try all three.
+//
+// Inspired by parsePrivateKey in crypto/tls/tls.go.
+func parsePrivateKey(der []byte) (crypto.Signer, error) {
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+		switch key := key.(type) {
+		case *rsa.PrivateKey:
+			return key, nil
+		case *ecdsa.PrivateKey:
+			return key, nil
+		default:
+			return nil, errors.New("acme/autocert: unknown private key type in PKCS#8 wrapping")
+		}
+	}
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return key, nil
+	}
+
+	return nil, errors.New("acme/autocert: failed to parse private key")
+}
+
+func startHttp() {
+        mux := http.NewServeMux()
+        //mux.Handle("/debug/vars", expvar.Handler())
+        /*mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                oks.Add(1)
+                fmt.Printf("Visitor %v \n", *oks)
+                fmt.Fprintf(w, "Nothing to see here \n")
+        }))*/
+        mux.Handle("/", http.HandlerFunc(RedirectHttp))
+        hs := http.Server{
+                ReadTimeout: 5 * time.Second,
+                WriteTimeout: 5 * time.Second,
+                Addr: fmt.Sprintf(":%d", 8080),
+                Handler: mux,
+        }
+        err := hs.ListenAndServe()
+        if err != nil {
+                fmt.Printf("Oops: %v \n", err)
+        }
+}
+
+func RedirectHttp(w http.ResponseWriter, r *http.Request) {
+        if r.TLS != nil || r.Host == "" {
+                http.Error(w, "Not Found", 404)
+        }
+        u := r.URL
+        u.Host = r.Host
+        u.Scheme = "https"
+        switch r.Method {
+        case "GET":
+                http.Redirect(w, r, u.String(), 302)
+        case "POST":
+                http.Redirect(w, r, u.String(), 307)
+        }
 }
